@@ -7,6 +7,7 @@
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=Fraunces:ital,opsz,wght@0,9..144,600;0,9..144,900;1,9..144,600&display=swap" rel="stylesheet">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 <style>
   :root{
     --bg:#fffaf3; --ink:#1f1a17; --ink-soft:#6b615a;
@@ -189,6 +190,20 @@
   .mv:hover{background:var(--yellow);color:var(--ink)}
   .mv:disabled{opacity:.25;cursor:default;background:transparent}
 
+  /* ---------- cloud sync ---------- */
+  .sync-bar{display:flex;gap:12px;align-items:center;flex-wrap:wrap;margin-bottom:20px}
+  .sync-chip{display:inline-flex;align-items:center;gap:8px;font-size:.8rem;font-weight:600;
+    padding:7px 14px;border-radius:999px;border:2px solid var(--ink);max-width:340px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .sync-chip.on{background:#dff5e5}
+  .sync-chip.busy{background:#fff3cd}
+  .sync-chip.off{background:#fde2de;color:#8a2a1f}
+  .sbtn{font:inherit;font-weight:600;font-size:.85rem;padding:8px 18px;border:var(--line);
+    border-radius:999px;background:var(--card);cursor:pointer;transition:.15s}
+  .sbtn:hover{background:var(--teal);color:#fff}
+  .sbtn.ghost:hover{background:transparent;color:var(--ink);text-decoration:underline}
+  .sync-hint{font-size:.78rem;color:var(--ink-soft)}
+  .auth-note{font-size:.82rem;color:var(--ink-soft);margin-bottom:14px}
+
   footer{text-align:center;color:var(--ink-soft);font-size:.85rem;margin-top:30px}
   @media (max-width:640px){
     .habit-emoji{width:32px;height:32px;font-size:1rem;border-radius:9px}
@@ -219,6 +234,8 @@
   </header>
 
   <div class="profile-bar" id="profileBar"></div>
+
+  <div class="sync-bar" id="syncBar"></div>
 
   <div class="strip">
     <div class="ring" id="ring"><div class="inner" id="ringText">0%</div></div>
@@ -275,7 +292,118 @@
   if(!store.profiles.find(p=>p.id===store.current))store.current=store.profiles[0].id;
   function profile(){return store.profiles.find(p=>p.id===store.current)}
   let habits=profile().habits;
-  function save(){localStorage.setItem(KEY,JSON.stringify(store))}
+  function save(){
+    localStorage.setItem(KEY,JSON.stringify(store));
+    if(sbUser){setSync("busy");clearTimeout(syncTimer);syncTimer=setTimeout(pushNow,700)}
+  }
+
+  // ======== Supabase cloud sync (multi-device) ========
+  const SUPABASE_URL="https://qxraupcxgiagrerpofda.supabase.co";
+  const SUPABASE_ANON_KEY="eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InF4cmF1cGN4Z2lhZ3JlcnBvZmRhIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODkwMzkyODAsImV4cCI6MjEwNDYxNTI4MH0.gmXMJKt7q2YKZnKm1Jx3bgK-yS-GaBe3EAw-T-r-xtA";
+  let sb=null,sbUser=null,syncTimer=null,lastUserId=null;
+  function sbReady(){
+    return !!(window.supabase&&/^https:\/\/[a-z0-9-]+\.supabase\.co$/i.test(SUPABASE_URL)&&SUPABASE_ANON_KEY.length>30);
+  }
+  if(sbReady()){try{sb=window.supabase.createClient(SUPABASE_URL,SUPABASE_ANON_KEY)}catch(e){sb=null}}
+
+  function setSync(state){
+    const chip=document.getElementById("syncChip");
+    if(!chip)return;
+    if(state==="busy"){chip.className="sync-chip busy";chip.textContent="\u21BB Syncing\u2026"}
+    else if(state==="on"){chip.className="sync-chip on";chip.textContent="\u2713 Synced \u00b7 "+(sbUser?sbUser.email:"")}
+    else{chip.className="sync-chip off";chip.textContent="\u26a0 Offline \u2014 changes saved on this device only"}
+  }
+
+  async function pushNow(){
+    if(!sbUser||!sb)return;
+    const {error}=await sb.from("habit_data").upsert({user_id:sbUser.id,data:store,updated_at:new Date().toISOString()});
+    if(error){setSync("off");toast("Sync problem: "+error.message)}
+    else setSync("on");
+  }
+
+  async function loadRemote(){
+    if(!sbUser||!sb)return;
+    setSync("busy");
+    const {data,error}=await sb.from("habit_data").select("data").eq("user_id",sbUser.id).maybeSingle();
+    if(error){setSync("off");toast("Sync problem: "+error.message);return}
+    if(data&&data.data&&Array.isArray(data.data.profiles)&&data.data.profiles.length){
+      store=data.data;
+      if(!store.profiles.find(p=>p.id===store.current))store.current=store.profiles[0].id;
+      habits=profile().habits;
+      localStorage.setItem(KEY,JSON.stringify(store));
+      setSync("on");render();
+    }else{
+      await pushNow(); // first sign-in: upload what's on this device
+      setSync("on");render();
+    }
+  }
+
+  function onUser(u){
+    const id=u?u.id:null;
+    if(id===lastUserId)return;
+    lastUserId=id;sbUser=u;
+    if(u)loadRemote();else render();
+  }
+
+  function renderSync(){
+    const bar=document.getElementById("syncBar");
+    if(!sbReady()){bar.style.display="none";return}
+    bar.style.display="flex";bar.innerHTML="";
+    if(!sbUser){
+      const b=document.createElement("button");b.className="sbtn";b.textContent="\u2601 Sign in to sync";
+      b.onclick=openAuthModal;bar.appendChild(b);
+      const h=document.createElement("span");h.className="sync-hint";
+      h.textContent="same account on every device \u2014 habits stay in sync";bar.appendChild(h);
+    }else{
+      const chip=document.createElement("span");chip.className="sync-chip on";chip.id="syncChip";
+      chip.textContent="\u2713 Synced \u00b7 "+sbUser.email;bar.appendChild(chip);
+      const o=document.createElement("button");o.className="sbtn ghost";o.textContent="Sign out";
+      o.onclick=async()=>{try{await sb.auth.signOut()}catch(e){}onUser(null)};
+      bar.appendChild(o);
+    }
+  }
+
+  function openAuthModal(){
+    const ov=document.createElement("div");ov.className="modal-ov";
+    const card=document.createElement("div");card.className="modal";
+    const h=document.createElement("h3");h.textContent="Sync across devices";card.appendChild(h);
+    const p=document.createElement("p");p.className="auth-note";
+    p.textContent="Use the same email & password on every device \u2014 your habits stay in sync automatically.";card.appendChild(p);
+    const em=document.createElement("input");em.type="email";em.className="modal-in";em.placeholder="Email";
+    em.autocomplete="email";card.appendChild(em);
+    const pw=document.createElement("input");pw.type="password";pw.className="modal-in";
+    pw.placeholder="Password (6+ characters)";pw.autocomplete="current-password";card.appendChild(pw);
+    const row=document.createElement("div");row.className="modal-row";
+    const cancel=document.createElement("button");cancel.className="mbtn ghost";cancel.textContent="Cancel";
+    const up=document.createElement("button");up.className="mbtn ghost";up.textContent="Create account";
+    const si=document.createElement("button");si.className="mbtn";si.textContent="Sign in";
+    row.appendChild(cancel);row.appendChild(up);row.appendChild(si);card.appendChild(row);
+    ov.appendChild(card);document.body.appendChild(ov);
+    const close=()=>ov.remove();
+    cancel.onclick=close;ov.onclick=e=>{if(e.target===ov)close()};
+    async function go(mode){
+      const email=em.value.trim(),pass=pw.value;
+      if(!email||email.indexOf("@")<1||pass.length<6){
+        toast("Enter a valid email and a password of 6+ characters.");return}
+      si.disabled=up.disabled=true;si.textContent="\u2026";
+      try{
+        let res;
+        if(mode==="in")res=await sb.auth.signInWithPassword({email,password:pass});
+        else res=await sb.auth.signUp({email,password:pass});
+        if(res&&res.error)throw res.error;
+        if(mode==="up"&&res.data&&!res.data.session){
+          toast("Account created \u2014 check your email for a confirmation link, then sign in.");
+          close();return;
+        }
+        close();
+      }catch(e){toast(e&&e.message?e.message:"Could not sign in.")}
+      si.disabled=up.disabled=false;si.textContent="Sign in";
+    }
+    si.onclick=()=>go("in");
+    up.onclick=()=>go("up");
+    pw.addEventListener("keydown",e=>{if(e.key==="Enter")go("in")});
+    em.focus();
+  }
 
   // ---- viewing month (default = current) ----
   let vy=today.getFullYear(), vm=today.getMonth();
@@ -399,6 +527,7 @@
   const WD=["Sun","Mon","Tue","Wed","Thu","Fri","Sat"];
   function render(){
     renderProfiles();
+    renderSync();
     document.getElementById("monthName").textContent=
       new Date(vy,vm,1).toLocaleDateString("en-IN",{month:"long",year:"numeric"});
 
@@ -518,6 +647,11 @@
     }catch(e){toast("That file doesn't look like a Habit Grid backup.")}};
     r.readAsText(f);this.value="";
   });
+
+  if(sb){
+    sb.auth.onAuthStateChange((evt,session)=>{onUser(session?session.user:null)});
+    sb.auth.getSession().then(({data})=>{onUser(data&&data.session?data.session.user:null)});
+  }
 
   render();
 })();
